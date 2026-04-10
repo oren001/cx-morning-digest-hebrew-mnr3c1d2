@@ -609,93 +609,154 @@ function getHTML(articles, userId, stats) {
 </html>`;
 }
 
-// ─── YNET SCRAPER ─────────────────────────────────────────────────────────────
+// ─── YNET RSS SCRAPER ─────────────────────────────────────────────────────────
+// Using RSS feeds instead of HTML scraping — Ynet is React-rendered so HTML
+// scraping returns empty content. RSS is structured XML, always works.
 
-const YNET_SECTIONS = [
-  { url: 'https://www.ynet.co.il/news/category/184', category: 'חדשות' },
-  { url: 'https://www.ynet.co.il/economy', category: 'כלכלה' },
-  { url: 'https://www.ynet.co.il/sport', category: 'ספורט' },
-  { url: 'https://www.ynet.co.il/digital', category: 'טכנולוגיה' },
-  { url: 'https://www.ynet.co.il/entertainment', category: 'בידור' },
-  { url: 'https://www.ynet.co.il/health', category: 'בריאות' },
+const YNET_RSS_FEEDS = [
+  { url: 'https://www.ynet.co.il/Integration/StoryRss2.xml',    category: 'חדשות' },
+  { url: 'https://www.ynet.co.il/Integration/StoryRss1854.xml', category: 'כלכלה' },
+  { url: 'https://www.ynet.co.il/Integration/StoryRss3262.xml', category: 'טכנולוגיה' },
+  { url: 'https://www.ynet.co.il/Integration/StoryRss6.xml',    category: 'ספורט' },
+  { url: 'https://www.ynet.co.il/Integration/StoryRss3084.xml', category: 'בידור' },
+  { url: 'https://www.ynet.co.il/Integration/StoryRss5099.xml', category: 'בריאות' },
 ];
+
+// Simple RSS/XML field extractor
+function extractXML(xml, tag) {
+  const re = new RegExp(`<${tag}[^>]*><!\\[CDATA\\[([\\s\\S]*?)\\]\\]><\\/${tag}>|<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'gi');
+  const m = re.exec(xml);
+  if (!m) return '';
+  return (m[1] || m[2] || '').trim();
+}
+
+function extractAllXML(xml, tag) {
+  const re = new RegExp(`<${tag}[^>]*>(?:<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>|([\\s\\S]*?))<\\/${tag}>`, 'gi');
+  const results = [];
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    results.push((m[1] || m[2] || '').trim());
+  }
+  return results;
+}
+
+function extractItems(xml) {
+  const items = [];
+  const itemRe = /<item>([\s\S]*?)<\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(xml)) !== null) {
+    items.push(m[1]);
+  }
+  return items;
+}
+
+function parseRSSDate(dateStr) {
+  if (!dateStr) return '';
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    // Convert to Israel time (UTC+3)
+    const israelTime = new Date(d.getTime() + 3 * 60 * 60 * 1000);
+    return `${israelTime.getUTCHours().toString().padStart(2,'0')}:${israelTime.getUTCMinutes().toString().padStart(2,'0')}`;
+  } catch(e) {
+    return '';
+  }
+}
+
+function extractImage(itemXml) {
+  // Try enclosure tag
+  const encRe = /<enclosure[^>]+url="([^"]+)"[^>]*>/i;
+  let m = encRe.exec(itemXml);
+  if (m) return m[1];
+
+  // Try media:content
+  const mediaRe = /<media:content[^>]+url="([^"]+)"[^>]*>/i;
+  m = mediaRe.exec(itemXml);
+  if (m) return m[1];
+
+  // Try img in description
+  const imgRe = /<img[^>]+src="([^"]+)"/i;
+  m = imgRe.exec(itemXml);
+  if (m) return m[1];
+
+  return null;
+}
+
+function cleanText(text) {
+  return text
+    .replace(/<[^>]+>/g, '')           // strip HTML tags
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&[a-z]+;/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 async function scrapeYnet() {
   const articles = [];
   const seen = new Set();
 
-  for (const section of YNET_SECTIONS) {
+  const fetches = YNET_RSS_FEEDS.map(async (feed) => {
     try {
-      const res = await fetch(section.url, {
+      const res = await fetch(feed.url, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-          'Accept-Language': 'he-IL,he;q=0.9,en;q=0.8',
+          'User-Agent': 'Mozilla/5.0 (compatible; MorningDigestBot/1.0)',
+          'Accept': 'application/rss+xml, application/xml, text/xml',
         },
-        cf: { cacheEverything: false }
+        cf: { cacheTtl: 300 } // cache 5 min in CF edge
       });
 
-      if (!res.ok) continue;
-      const html = await res.text();
-
-      // Extract article links and titles from Ynet HTML
-      const linkRe = /href="(\/articles\/[^"]+)"/g;
-      const titleRe = /<h[123][^>]*class="[^"]*title[^"]*"[^>]*>([^<]+)<\/h[123]>/gi;
-      const imgRe = /<img[^>]+src="(https:\/\/ynet-pic[^"]+)"[^>]*>/gi;
-      const summaryRe = /<p[^>]*class="[^"]*subtitle[^"]*"[^>]*>([^<]{20,200})<\/p>/gi;
-
-      const links = [];
-      let m;
-      while ((m = linkRe.exec(html)) !== null) {
-        const url = 'https://www.ynet.co.il' + m[1];
-        if (!seen.has(url)) {
-          seen.add(url);
-          links.push(url);
-        }
+      if (!res.ok) {
+        console.error(`RSS fetch failed for ${feed.url}: ${res.status}`);
+        return;
       }
 
-      const titles = [];
-      while ((m = titleRe.exec(html)) !== null) {
-        titles.push(m[1].trim().replace(/&[a-z]+;/g, ''));
-      }
-
-      const images = [];
-      while ((m = imgRe.exec(html)) !== null) {
-        images.push(m[1]);
-      }
-
-      const summaries = [];
-      while ((m = summaryRe.exec(html)) !== null) {
-        summaries.push(m[1].trim().replace(/<[^>]+>/g, ''));
-      }
-
+      const xml = await res.text();
+      const items = extractItems(xml);
       const now = new Date();
-      const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
 
-      for (let i = 0; i < Math.min(links.length, 12); i++) {
-        if (titles[i]) {
-          const id = hashString(links[i]);
-          articles.push({
-            id,
-            url: links[i],
-            title: titles[i],
-            summary: summaries[i] || '',
-            image: images[i] || null,
-            category: section.category,
-            publishedAt: timeStr,
-            scrapedAt: now.toISOString(),
-            personalScore: 0.5, // default, updated by ML ranking
-          });
-        }
+      for (const item of items.slice(0, 15)) {
+        const rawTitle = extractXML(item, 'title');
+        const rawLink  = extractXML(item, 'link') || extractXML(item, 'guid');
+        const rawDesc  = extractXML(item, 'description');
+        const rawDate  = extractXML(item, 'pubDate');
+
+        const title = cleanText(rawTitle);
+        const url   = rawLink.startsWith('http') ? rawLink : `https://www.ynet.co.il${rawLink}`;
+        const summary = cleanText(rawDesc).slice(0, 200);
+        const image = extractImage(item);
+        const publishedAt = parseRSSDate(rawDate) || `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+
+        if (!title || title.length < 5) continue;
+        if (seen.has(url)) continue;
+        seen.add(url);
+
+        const id = hashString(url);
+        articles.push({
+          id,
+          url,
+          title,
+          summary,
+          image,
+          category: feed.category,
+          publishedAt,
+          scrapedAt: now.toISOString(),
+          personalScore: 0.5,
+        });
       }
-
-      // Small delay between requests
-      await sleep(2000);
     } catch (err) {
-      console.error(`Error scraping ${section.url}:`, err.message);
+      console.error(`Error fetching RSS ${feed.url}:`, err.message);
     }
-  }
+  });
 
+  // Fetch all feeds in parallel (no delays needed with RSS)
+  await Promise.all(fetches);
+
+  console.log(`📰 Total articles scraped: ${articles.length}`);
   return articles;
 }
 
