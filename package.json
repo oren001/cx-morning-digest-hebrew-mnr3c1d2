@@ -1,28 +1,18 @@
-```json
 {
-  "name": "personal-morning-digest",
+  "name": "morning-digest",
   "version": "1.0.0",
-  "description": "Personal morning digest that scrapes Ynet news and delivers personalized summaries",
+  "description": "Personal Hebrew morning digest - scrapes Ynet and delivers personalized summaries",
   "main": "index.js",
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "kv:namespace:create": "wrangler kv:namespace create ARTICLES",
-    "kv:namespace:list": "wrangler kv:namespace list",
-    "test": "echo \"No tests specified\" && exit 0"
+    "kv:create": "wrangler kv namespace create ARTICLES_KV",
+    "kv:create:preview": "wrangler kv namespace create ARTICLES_KV --preview",
+    "kv:list": "wrangler kv namespace list"
   },
-  "keywords": [
-    "cloudflare",
-    "workers",
-    "news",
-    "digest",
-    "ynet",
-    "hebrew",
-    "personalization",
-    "machine-learning"
-  ],
-  "author": "",
+  "keywords": ["cloudflare", "workers", "news", "digest", "ynet", "hebrew"],
+  "author": "CyberNexus",
   "license": "MIT",
   "devDependencies": {
     "wrangler": "^3.78.0"
@@ -32,4 +22,3 @@
     "node": ">=18.0.0"
   }
 }
-```
